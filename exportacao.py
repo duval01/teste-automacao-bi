@@ -127,7 +127,7 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
 
             # --- Exportação ---
             try:
-                botao_exportar = page.get_by_role("button", name="Exportar")
+                botao_exportar = page.get_by_role("button", name="Export")
                 if not botao_exportar.is_visible():
                      # Tenta achar pelo menu 'Arquivo' se o botão direto não estiver lá
                      pass 
@@ -141,10 +141,10 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
                 page.wait_for_selector("mat-dialog-container", timeout=20000)
                 
                 # Garante que vai exportar o que estamos vendo
-                page.get_by_text("Valores atuais", exact=False).click()
+                page.get_by_text("Current values", exact=False).click()
 
                 with page.expect_download(timeout=180000) as download_info:
-                    page.locator("mat-dialog-actions").get_by_role("button", name="Exportar").click()
+                    page.locator("mat-dialog-actions").get_by_role("button", name="Export").click()
                     
                 download = download_info.value
                 download.save_as(caminho_final)
