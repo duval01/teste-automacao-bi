@@ -105,7 +105,7 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
             # Localiza o input de busca (lupinha)
             try:
                 campo_busca = page.locator("input.searchInput")
-                campo_busca.wait_for(state="visible", timeout=30000)
+                campo_busca.wait_for(state="visible", timeout=60000)
                 
                 campo_busca.click()
                 campo_busca.clear()
