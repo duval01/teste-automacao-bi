@@ -195,7 +195,7 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
                 page.wait_for_selector("mat-dialog-container", timeout=20000)
                 
                 # Checkbox 'Current values'
-                page.get_by_text("Current values", exact=True).click()
+                page.get_by_text("Current Values", exact=True).click()
 
                 # Download
                 with page.expect_download(timeout=180000) as download_info:
