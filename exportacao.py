@@ -5,6 +5,7 @@ import subprocess
 import json
 import time
 import shutil
+import base64  # <--- NOVO: Necessário para decodificar o secret
 import requests
 import streamlit as st
 from playwright.sync_api import sync_playwright
@@ -45,7 +46,7 @@ def carregar_municipios_mg():
         st.error(f"Erro ao carregar municípios: {e}")
         return ["Belo Horizonte", "Contagem", "Uberlândia"]
 
-# --- 4. LÓGICA DO PLAYWRIGHT COM DIAGNÓSTICO ---
+# --- 4. LÓGICA DO PLAYWRIGHT COM DIAGNÓSTICO E BASE64 ---
 
 def executar_exportacao(url_relatorio, municipio, output_folder):
     # Cria pastas necessárias
@@ -62,25 +63,39 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
     # Variável para retornar o caminho da imagem de erro, se houver
     erro_screenshot = None
 
-    # --- AUTENTICAÇÃO ---
+    # --- AUTENTICAÇÃO INTELIGENTE (BASE64 PRIORITY) ---
     auth_state = None
-    if "auth_file" in st.secrets and "json_content" in st.secrets["auth_file"]:
+    
+    # 1. Tenta ler Base64 (Método Seguro para Strings Gigantes)
+    if "auth_file" in st.secrets and "json_encoded" in st.secrets["auth_file"]:
+        try:
+            b64_content = st.secrets["auth_file"]["json_encoded"]
+            decoded_json = base64.b64decode(b64_content).decode("utf-8")
+            auth_state = json.loads(decoded_json)
+            log("🔑 Autenticação carregada via Secrets (Base64)")
+        except Exception as e:
+            return None, f"Erro ao decodificar Base64 do Secrets: {e}", None
+
+    # 2. Tenta ler JSON puro (Fallback antigo)
+    elif "auth_file" in st.secrets and "json_content" in st.secrets["auth_file"]:
         try:
             auth_state = json.loads(st.secrets["auth_file"]["json_content"])
-            log("🔑 Usando autenticação via Secrets (Cloud)")
+            log("🔑 Autenticação carregada via Secrets (JSON Puro)")
         except Exception as e:
-            return None, f"Erro ao ler Secrets: {e}", None
+            return None, f"Erro ao ler JSON do Secrets: {e}", None
+            
+    # 3. Tenta arquivo local (Dev Local)
     elif os.path.exists("auth.json"):
         auth_state = "auth.json"
         log("💻 Usando arquivo auth.json local")
     else:
-        return None, "Autenticação não encontrada.", None
+        return None, "Autenticação não encontrada. Configure o secrets.toml com 'json_encoded'.", None
 
     url_base_limpa = url_relatorio.split("?")[0] + "?experience=power-bi"
 
     try:
         with sync_playwright() as p:
-            # Headless=True para servidor, False para ver rodando localmente
+            # Headless=True para servidor
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             
             context = browser.new_context(
@@ -92,13 +107,23 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
             log(f"Acessando relatório: {url_base_limpa}")
             page.goto(url_base_limpa, timeout=60000, wait_until="domcontentloaded")
             
-            # Espera inteligente pela rede (ignora se der timeout, pois PBI tem requests constantes)
+            # --- VERIFICAÇÃO CRÍTICA DE LOGIN ---
+            # Se redirecionou para login da Microsoft, o token morreu.
+            time.sleep(3) # Pequena pausa para verificar redirecionamento
+            if "login.microsoftonline.com" in page.url or page.locator("input[name='loginfmt']").count() > 0:
+                # Tira print da tela de login para provar
+                erro_screenshot = os.path.join(debug_folder, "erro_login_expirado.png")
+                page.screenshot(path=erro_screenshot)
+                browser.close()
+                return None, "Sessão expirada! O Power BI pediu login. Gere um novo auth.json e atualize o secrets.", erro_screenshot
+            # ------------------------------------
+
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
             except:
                 log("Networkidle excedido, continuando...")
 
-            page.wait_for_timeout(5000) # Garantia extra para renderização
+            page.wait_for_timeout(5000) 
 
             # --- TENTATIVA DE FILTRAR MUNICÍPIO (COM SUPORTE A IFRAME) ---
             try:
@@ -129,54 +154,41 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
 
                 # Interação
                 elemento_alvo.click()
-                elemento_alvo.fill("") # Limpa forçado
+                elemento_alvo.fill("") 
                 elemento_alvo.fill(municipio)
                 log(f"Digitado: {municipio}")
                 
-                page.wait_for_timeout(3000) # Espera filtrar visualmente
+                page.wait_for_timeout(3000)
 
-                # Selecionar o checkbox/texto exato
-                # Nota: Se o input estava num iframe, o texto também estará. 
-                # O Playwright geralmente acha texto visualmente independente do frame, mas é bom garantir.
-                
-                # Clicar no município (tenta encontrar o texto na página toda)
+                # Clicar no município 
                 clique_sucesso = False
                 try:
                     page.get_by_text(municipio, exact=True).first.click(timeout=5000)
                     clique_sucesso = True
                 except:
-                    # Se falhar na página, tenta dentro do frame onde achamos o input
-                    if elemento_alvo: 
-                        # frame_parent é o dono do elemento_alvo
-                        # Nota: element_handle não tem 'page', mas podemos usar o frame locator se salvássemos o frame.
-                        # Simplificação: Tentar clicar genericamente se falhar o exact
-                        pass
+                    pass
                 
                 if not clique_sucesso:
                     log("Tentando clique alternativo...")
-                    page.locator(f"span[title='{municipio}']").first.click()
+                    # Tenta achar o checkbox ou span dentro do mesmo frame do input
+                    if elemento_alvo: 
+                         # Aqui simplificamos: se falhar o exact, tenta achar qualquer texto que contenha
+                         page.locator(f"span:has-text('{municipio}')").first.click(timeout=5000)
 
                 log("Filtro aplicado. Aguardando renderização...")
                 page.wait_for_timeout(6000) 
 
             except Exception as e:
-                # --- CAPTURA DE DIAGNÓSTICO (ERRO NO FILTRO) ---
                 log("❌ Erro ao filtrar. Gerando evidências...")
                 timestamp = int(time.time())
                 erro_screenshot = os.path.join(debug_folder, f"erro_filtro_{timestamp}.png")
                 page.screenshot(path=erro_screenshot, full_page=True)
-                
-                # Salva HTML para inspeção
-                with open(os.path.join(debug_folder, f"dom_erro_{timestamp}.html"), "w", encoding="utf-8") as f:
-                    f.write(page.content())
-                
                 browser.close()
-                return None, f"Erro ao filtrar município (veja imagem abaixo): {e}", erro_screenshot
+                return None, f"Erro ao filtrar município: {e}", erro_screenshot
 
             # --- EXPORTAÇÃO ---
             try:
                 log("Iniciando exportação PDF...")
-                # Botão Export
                 page.get_by_role("button", name="Export").click()
                 page.get_by_text("PDF").click()
                 
@@ -194,7 +206,6 @@ def executar_exportacao(url_relatorio, municipio, output_folder):
                 log("PDF salvo com sucesso.")
                 
             except Exception as e:
-                # --- CAPTURA DE DIAGNÓSTICO (ERRO NA EXPORTAÇÃO) ---
                 timestamp = int(time.time())
                 erro_screenshot = os.path.join(debug_folder, f"erro_export_{timestamp}.png")
                 page.screenshot(path=erro_screenshot)
@@ -232,7 +243,6 @@ if st.button("Gerar PDF", type="primary"):
         
         with status_box:
             st.write("🤖 Inicializando robô...")
-            # Chama a função
             caminho_arquivo, mensagem, img_erro = executar_exportacao(URL_BASE, municipio_selecionado, PASTA_TEMP)
             
             if caminho_arquivo:
@@ -250,10 +260,6 @@ if st.button("Gerar PDF", type="primary"):
                 status_box.update(label="Falha no processo", state="error", expanded=True)
                 st.error(f"❌ {mensagem}")
                 
-                # MOSTRA O SCREENSHOT DO ERRO NA TELA
                 if img_erro and os.path.exists(img_erro):
-                    st.warning("📸 Screenshot do momento do erro:")
-                    st.image(img_erro, caption="O que o robô estava vendo quando falhou", use_container_width=True)
-                    
-                    # Opcional: Ler o HTML se quiser (normalmente só imagem basta)
-                    # st.download_button("Baixar HTML de Debug", ...)
+                    st.warning("📸 Screenshot do erro:")
+                    st.image(img_erro, caption="Tela do navegador no momento da falha", use_container_width=True)
